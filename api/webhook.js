@@ -43,8 +43,8 @@ bot.on("callback_query", async callbackQuery => {
 
   if (data === "start_test") {
     await startTest(chatId)
-  } else if (data === "next") {
-    await sendNextQuestion(chatId)
+  } else if (data === "next" || data === "skip") {
+    await handleNextQuestion(chatId, callbackQuery.message.message_id)
   }
 
   // Answer the callback query to remove the loading state
@@ -61,7 +61,7 @@ bot.on("poll_answer", async pollAnswer => {
 
   await updateAnswer(chatId, test.currentQuestion, userAnswer)
 
-  // Change to "Next" button
+  // Change "Skip" button to "Next" button
   await bot.editMessageReplyMarkup(
     {
       inline_keyboard: [[{ text: "Next", callback_data: "next" }]],
@@ -86,10 +86,7 @@ async function startTest(chatId) {
 
 async function getQuestions() {
   const { rows } = await client.execute("SELECT * FROM questions")
-  return rows.map((question, index) => ({
-    ...question,
-    correct_option_id: ["a", "b", "c", "d"].indexOf(question.correct_answer),
-  }))
+  return rows
 }
 
 async function sendNextQuestion(chatId) {
@@ -115,14 +112,22 @@ async function sendNextQuestion(chatId) {
       type: "regular",
       allows_multiple_answers: false,
       reply_markup: {
-        inline_keyboard: [],
+        inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]],
       },
     }
   )
 
   // Store the message ID for later reference
   test.currentMessageId = message.message_id
+}
+
+async function handleNextQuestion(chatId, messageId) {
+  const test = activeTests.get(chatId)
+  if (!test) return
+
   test.currentQuestion++
+  await bot.stopPoll(chatId, messageId)
+  await sendNextQuestion(chatId)
 }
 
 async function updateAnswer(chatId, questionIndex, userAnswer) {
