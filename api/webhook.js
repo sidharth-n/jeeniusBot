@@ -11,7 +11,7 @@ const client = createClient({
 })
 
 // Global variables
-const TEST_DURATION = 500 * 1000 // 30 seconds for testing
+const TEST_DURATION = 600 * 1000 // 30 seconds for testing
 const activeTests = new Map()
 
 // Start command
@@ -39,14 +39,39 @@ bot.on("callback_query", async callbackQuery => {
 
   if (data === "start_test") {
     await startTest(chatId)
-  } else if (data.startsWith("answer_")) {
-    await handleAnswer(chatId, callbackQuery.message.message_id, data)
-  } else if (data === "skip") {
-    await handleSkip(chatId, callbackQuery.message.message_id)
+  } else if (data === "next" || data === "skip") {
+    await handleNextQuestion(chatId, callbackQuery.message.message_id)
   }
 
   // Answer the callback query to remove the loading state
   bot.answerCallbackQuery(callbackQuery.id)
+})
+
+// Handle poll answers
+bot.on("poll_answer", async pollAnswer => {
+  const chatId = pollAnswer.user.id
+  const test = activeTests.get(chatId)
+  if (!test) return
+
+  const question = test.questions[test.currentQuestion]
+  const userAnswer = pollAnswer.option_ids[0]
+
+  test.answers[test.currentQuestion] = userAnswer
+
+  if (userAnswer === question.correct_option_id) {
+    test.score++
+  }
+
+  // Change "Skip" button to "Next" button
+  await bot.editMessageReplyMarkup(
+    {
+      inline_keyboard: [[{ text: "Next", callback_data: "next" }]],
+    },
+    {
+      chat_id: chatId,
+      message_id: test.currentMessageId,
+    }
+  )
 })
 
 async function startTest(chatId) {
@@ -56,6 +81,8 @@ async function startTest(chatId) {
     currentQuestion: 0,
     score: 0,
     startTime: Date.now(),
+    answers: new Array(questions.length).fill(null),
+    currentMessageId: null,
   })
 
   await sendNextQuestion(chatId)
@@ -68,7 +95,10 @@ async function getQuestions() {
   const { rows } = await client.execute(
     "SELECT * FROM questions ORDER BY RANDOM() LIMIT 5"
   )
-  return rows
+  return rows.map((question, index) => ({
+    ...question,
+    correct_option_id: ["a", "b", "c", "d"].indexOf(question.correct_answer),
+  }))
 }
 
 async function sendNextQuestion(chatId) {
@@ -79,22 +109,20 @@ async function sendNextQuestion(chatId) {
 
   const question = test.questions[test.currentQuestion]
   const options = [
-    { text: question.option_a, callback_data: "answer_a" },
-    { text: question.option_b, callback_data: "answer_b" },
-    { text: question.option_c, callback_data: "answer_c" },
-    { text: question.option_d, callback_data: "answer_d" },
+    question.option_a,
+    question.option_b,
+    question.option_c,
+    question.option_d,
   ]
 
   const message = await bot.sendPoll(
     chatId,
     `Question ${test.currentQuestion + 1}: ${question.question}`,
-    options.map(option => option.text),
+    options,
     {
       is_anonymous: false,
       type: "quiz",
-      correct_option_id: options.findIndex(
-        option => option.callback_data.split("_")[1] === question.correct_answer
-      ),
+      correct_option_id: question.correct_option_id,
       explanation:
         "Select your answer or press 'Skip' to move to the next question.",
       reply_markup: {
@@ -107,25 +135,14 @@ async function sendNextQuestion(chatId) {
   test.currentMessageId = message.message_id
 }
 
-async function handleAnswer(chatId, messageId, data) {
+async function handleNextQuestion(chatId, messageId) {
   const test = activeTests.get(chatId)
   if (!test) return
 
-  const question = test.questions[test.currentQuestion]
-  const answer = data.split("_")[1]
-
-  if (answer === question.correct_answer) {
-    test.score++
+  // If the question wasn't answered, mark it as skipped
+  if (test.answers[test.currentQuestion] === null) {
+    test.answers[test.currentQuestion] = "skipped"
   }
-
-  test.currentQuestion++
-  await bot.stopPoll(chatId, messageId)
-  await sendNextQuestion(chatId)
-}
-
-async function handleSkip(chatId, messageId) {
-  const test = activeTests.get(chatId)
-  if (!test) return
 
   test.currentQuestion++
   await bot.stopPoll(chatId, messageId)
@@ -139,14 +156,48 @@ async function endTest(chatId) {
   const endTime = Date.now()
   const timeTaken = (endTime - test.startTime) / 1000
 
-  await saveTestResult(chatId, test.score, test.questions.length, timeTaken)
+  // Stop all active polls
+  for (let i = 0; i <= test.currentQuestion; i++) {
+    if (test.answers[i] === null) {
+      test.answers[i] = "unanswered"
+    }
+    try {
+      await bot.stopPoll(
+        chatId,
+        test.currentMessageId - (test.currentQuestion - i)
+      )
+    } catch (error) {
+      console.error(`Failed to stop poll for question ${i + 1}:`, error)
+    }
+  }
 
-  bot.sendMessage(
+  await saveTestResult(
     chatId,
-    `Test completed!\nScore: ${test.score}/${
-      test.questions.length
-    }\nTime taken: ${timeTaken.toFixed(2)} seconds`
+    test.score,
+    test.questions.length,
+    timeTaken,
+    test.answers
   )
+
+  let resultMessage = `Test completed!\nScore: ${test.score}/${
+    test.questions.length
+  }\nTime taken: ${timeTaken.toFixed(2)} seconds\n\nQuestion summary:`
+  test.answers.forEach((answer, index) => {
+    resultMessage += `\nQ${index + 1}: ${
+      answer === "skipped"
+        ? "Skipped"
+        : answer === "unanswered"
+        ? "Unanswered"
+        : answer === test.questions[index].correct_option_id
+        ? "Correct"
+        : "Incorrect"
+    }`
+  })
+
+  bot.sendMessage(chatId, resultMessage)
+
+  // Send timeout message
+  bot.sendMessage(chatId, "Time's up! The test has ended.")
 
   activeTests.delete(chatId)
 }
@@ -158,7 +209,13 @@ async function ensureUser(chatId, userInfo) {
   })
 }
 
-async function saveTestResult(chatId, score, totalQuestions, timeTaken) {
+async function saveTestResult(
+  chatId,
+  score,
+  totalQuestions,
+  timeTaken,
+  answers
+) {
   const { rows } = await client.execute({
     sql: "SELECT id FROM users WHERE chat_id = ?",
     args: [chatId],
@@ -166,7 +223,7 @@ async function saveTestResult(chatId, score, totalQuestions, timeTaken) {
   const userId = rows[0].id
 
   await client.execute({
-    sql: "INSERT INTO tests (user_id, start_time, end_time, score, total_questions, correct_answers) VALUES (?, datetime(?), datetime(?), ?, ?, ?)",
+    sql: "INSERT INTO tests (user_id, start_time, end_time, score, total_questions, correct_answers, answers) VALUES (?, datetime(?), datetime(?), ?, ?, ?, ?)",
     args: [
       userId,
       new Date(Date.now() - timeTaken * 1000).toISOString(),
@@ -174,6 +231,7 @@ async function saveTestResult(chatId, score, totalQuestions, timeTaken) {
       score,
       totalQuestions,
       score,
+      JSON.stringify(answers),
     ],
   })
 }
