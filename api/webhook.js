@@ -38,12 +38,15 @@ bot.on("callback_query", async callbackQuery => {
   const data = callbackQuery.data
 
   if (data === "start_test") {
-    startTest(chatId)
+    await startTest(chatId)
   } else if (data.startsWith("answer_")) {
-    handleAnswer(chatId, data)
+    await handleAnswer(chatId, callbackQuery.message.message_id, data)
   } else if (data === "skip") {
-    sendNextQuestion(chatId)
+    await handleSkip(chatId, callbackQuery.message.message_id)
   }
+
+  // Answer the callback query to remove the loading state
+  bot.answerCallbackQuery(callbackQuery.id)
 })
 
 async function startTest(chatId) {
@@ -55,7 +58,7 @@ async function startTest(chatId) {
     startTime: Date.now(),
   })
 
-  sendNextQuestion(chatId)
+  await sendNextQuestion(chatId)
 
   // Set timeout to end the test
   setTimeout(() => endTest(chatId), TEST_DURATION)
@@ -82,21 +85,29 @@ async function sendNextQuestion(chatId) {
     { text: question.option_d, callback_data: "answer_d" },
   ]
 
-  bot.sendMessage(
+  const message = await bot.sendPoll(
     chatId,
     `Question ${test.currentQuestion + 1}: ${question.question}`,
+    options.map(option => option.text),
     {
+      is_anonymous: false,
+      type: "quiz",
+      correct_option_id: options.findIndex(
+        option => option.callback_data.split("_")[1] === question.correct_answer
+      ),
+      explanation:
+        "Select your answer or press 'Skip' to move to the next question.",
       reply_markup: {
-        inline_keyboard: [
-          ...options.map(option => [option]),
-          [{ text: "Skip", callback_data: "skip" }],
-        ],
+        inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]],
       },
     }
   )
+
+  // Store the message ID for later reference
+  test.currentMessageId = message.message_id
 }
 
-async function handleAnswer(chatId, data) {
+async function handleAnswer(chatId, messageId, data) {
   const test = activeTests.get(chatId)
   if (!test) return
 
@@ -108,7 +119,17 @@ async function handleAnswer(chatId, data) {
   }
 
   test.currentQuestion++
-  sendNextQuestion(chatId)
+  await bot.stopPoll(chatId, messageId)
+  await sendNextQuestion(chatId)
+}
+
+async function handleSkip(chatId, messageId) {
+  const test = activeTests.get(chatId)
+  if (!test) return
+
+  test.currentQuestion++
+  await bot.stopPoll(chatId, messageId)
+  await sendNextQuestion(chatId)
 }
 
 async function endTest(chatId) {
