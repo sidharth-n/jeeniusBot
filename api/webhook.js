@@ -11,7 +11,6 @@ const client = createClient({
 })
 
 // Global variables
-const TEST_DURATION = 600 * 1000 // 30 seconds for testing
 const activeTests = new Map()
 
 // Start command
@@ -21,13 +20,12 @@ bot.onText(/\/start/, async msg => {
 
   // If there's an active test, end it
   if (activeTests.has(chatId)) {
-    clearTimeout(activeTests.get(chatId).timeoutId)
     await endTest(chatId, true)
   }
 
   bot.sendMessage(
     chatId,
-    'Welcome to the JEE Mock Test Bot! This test contains 5 questions and lasts for 30 seconds. Press "Start Test" when you\'re ready.',
+    'Welcome to the JEE Mock Test Bot! This test contains multiple-choice questions. Press "Start Test" when you\'re ready.',
     {
       reply_markup: {
         inline_keyboard: [
@@ -45,8 +43,8 @@ bot.on("callback_query", async callbackQuery => {
 
   if (data === "start_test") {
     await startTest(chatId)
-  } else if (data === "next" || data === "skip") {
-    await handleNextQuestion(chatId, callbackQuery.message.message_id)
+  } else if (data === "next") {
+    await sendNextQuestion(chatId)
   }
 
   // Answer the callback query to remove the loading state
@@ -59,16 +57,11 @@ bot.on("poll_answer", async pollAnswer => {
   const test = activeTests.get(chatId)
   if (!test) return
 
-  const question = test.questions[test.currentQuestion]
   const userAnswer = pollAnswer.option_ids[0]
 
-  test.answers[test.currentQuestion] = userAnswer
+  await updateAnswer(chatId, test.currentQuestion, userAnswer)
 
-  if (userAnswer === question.correct_option_id) {
-    test.score++
-  }
-
-  // Change "Skip" button to "Next" button
+  // Change to "Next" button
   await bot.editMessageReplyMarkup(
     {
       inline_keyboard: [[{ text: "Next", callback_data: "next" }]],
@@ -82,25 +75,17 @@ bot.on("poll_answer", async pollAnswer => {
 
 async function startTest(chatId) {
   const questions = await getQuestions()
-  const timeoutId = setTimeout(() => endTest(chatId), TEST_DURATION)
-
   activeTests.set(chatId, {
     questions,
     currentQuestion: 0,
-    score: 0,
-    startTime: Date.now(),
-    answers: new Array(questions.length).fill(null),
     currentMessageId: null,
-    timeoutId,
   })
 
   await sendNextQuestion(chatId)
 }
 
 async function getQuestions() {
-  const { rows } = await client.execute(
-    "SELECT * FROM questions ORDER BY RANDOM() LIMIT 5"
-  )
+  const { rows } = await client.execute("SELECT * FROM questions")
   return rows.map((question, index) => ({
     ...question,
     correct_option_id: ["a", "b", "c", "d"].indexOf(question.correct_answer),
@@ -127,108 +112,20 @@ async function sendNextQuestion(chatId) {
     options,
     {
       is_anonymous: false,
-      type: "quiz",
-      correct_option_id: question.correct_option_id,
-      explanation:
-        "Select your answer or press 'Skip' to move to the next question.",
+      type: "regular",
+      allows_multiple_answers: false,
       reply_markup: {
-        inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]],
+        inline_keyboard: [],
       },
     }
   )
 
   // Store the message ID for later reference
   test.currentMessageId = message.message_id
-}
-
-async function handleNextQuestion(chatId, messageId) {
-  const test = activeTests.get(chatId)
-  if (!test) return
-
-  // If the question wasn't answered, mark it as skipped
-  if (test.answers[test.currentQuestion] === null) {
-    test.answers[test.currentQuestion] = "skipped"
-  }
-
   test.currentQuestion++
-  await bot.stopPoll(chatId, messageId)
-  await sendNextQuestion(chatId)
 }
 
-async function endTest(chatId, isRestart = false) {
-  const test = activeTests.get(chatId)
-  if (!test) return
-
-  clearTimeout(test.timeoutId)
-
-  const endTime = Date.now()
-  const timeTaken = (endTime - test.startTime) / 1000
-
-  // Stop all active polls
-  for (let i = 0; i <= test.currentQuestion; i++) {
-    if (test.answers[i] === null) {
-      test.answers[i] = "unanswered"
-    }
-    try {
-      await bot.stopPoll(
-        chatId,
-        test.currentMessageId - (test.currentQuestion - i)
-      )
-    } catch (error) {
-      console.error(`Failed to stop poll for question ${i + 1}:`, error)
-    }
-  }
-
-  await saveTestResult(
-    chatId,
-    test.score,
-    test.questions.length,
-    timeTaken,
-    test.answers
-  )
-
-  if (!isRestart) {
-    let resultMessage = `Test completed!\nScore: ${test.score}/${
-      test.questions.length
-    }\nTime taken: ${timeTaken.toFixed(2)} seconds\n\nQuestion summary:`
-    test.answers.forEach((answer, index) => {
-      resultMessage += `\nQ${index + 1}: ${
-        answer === "skipped"
-          ? "Skipped"
-          : answer === "unanswered"
-          ? "Unanswered"
-          : answer === test.questions[index].correct_option_id
-          ? "Correct"
-          : "Incorrect"
-      }`
-    })
-
-    bot.sendMessage(chatId, resultMessage)
-
-    // Send timeout message
-    bot.sendMessage(
-      chatId,
-      "Time's up! The test has ended. Send /start to take the test again."
-    )
-  }
-
-  activeTests.delete(chatId)
-}
-
-async function ensureUser(chatId, userInfo) {
-  await client.execute({
-    sql: "INSERT OR IGNORE INTO users (chat_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
-    args: [chatId, userInfo.username, userInfo.first_name, userInfo.last_name],
-  })
-}
-
-async function saveTestResult(
-  chatId,
-  score,
-  totalQuestions,
-  timeTaken,
-  answers
-) {
+async function updateAnswer(chatId, questionIndex, userAnswer) {
   const { rows } = await client.execute({
     sql: "SELECT id FROM users WHERE chat_id = ?",
     args: [chatId],
@@ -236,16 +133,75 @@ async function saveTestResult(
   const userId = rows[0].id
 
   await client.execute({
-    sql: "INSERT INTO tests (user_id, start_time, end_time, score, total_questions, correct_answers, answers) VALUES (?, datetime(?), datetime(?), ?, ?, ?, ?)",
-    args: [
-      userId,
-      new Date(Date.now() - timeTaken * 1000).toISOString(),
-      new Date().toISOString(),
-      score,
-      totalQuestions,
-      score,
-      JSON.stringify(answers),
-    ],
+    sql: "INSERT OR REPLACE INTO user_answers (user_id, question_id, answer) VALUES (?, ?, ?)",
+    args: [userId, questionIndex + 1, userAnswer],
+  })
+}
+
+async function endTest(chatId, isRestart = false) {
+  const test = activeTests.get(chatId)
+  if (!test) return
+
+  if (!isRestart) {
+    const results = await calculateResults(chatId)
+    let resultMessage = `Test completed!\n\nTotal Questions: ${results.totalQuestions}\nAttempted: ${results.attempted}\nCorrect: ${results.correct}\nIncorrect: ${results.incorrect}\nUnattempted: ${results.unattempted}\n\nTotal Score: ${results.totalScore}`
+
+    bot.sendMessage(chatId, resultMessage)
+    bot.sendMessage(
+      chatId,
+      "The answer key will be published later. Send /start to take the test again."
+    )
+  }
+
+  activeTests.delete(chatId)
+}
+
+async function calculateResults(chatId) {
+  const { rows: userRows } = await client.execute({
+    sql: "SELECT id FROM users WHERE chat_id = ?",
+    args: [chatId],
+  })
+  const userId = userRows[0].id
+
+  const { rows: answerRows } = await client.execute({
+    sql: "SELECT q.id, q.correct_answer, ua.answer FROM questions q LEFT JOIN user_answers ua ON q.id = ua.question_id AND ua.user_id = ?",
+    args: [userId],
+  })
+
+  let correct = 0
+  let incorrect = 0
+  let unattempted = 0
+
+  answerRows.forEach(row => {
+    if (row.answer === null) {
+      unattempted++
+    } else if (
+      row.answer === ["a", "b", "c", "d"].indexOf(row.correct_answer)
+    ) {
+      correct++
+    } else {
+      incorrect++
+    }
+  })
+
+  const totalQuestions = answerRows.length
+  const attempted = correct + incorrect
+  const totalScore = correct * 4 - incorrect
+
+  return {
+    totalQuestions,
+    attempted,
+    correct,
+    incorrect,
+    unattempted,
+    totalScore,
+  }
+}
+
+async function ensureUser(chatId, userInfo) {
+  await client.execute({
+    sql: "INSERT OR IGNORE INTO users (chat_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+    args: [chatId, userInfo.username, userInfo.first_name, userInfo.last_name],
   })
 }
 
