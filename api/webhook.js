@@ -11,7 +11,7 @@ const client = createClient({
 })
 
 // Global variables
-const TEST_DURATION = 30 * 1000 // 30 seconds for testing
+const TEST_DURATION = 500 * 1000 // 30 seconds for testing
 const activeTests = new Map()
 
 // Start command
