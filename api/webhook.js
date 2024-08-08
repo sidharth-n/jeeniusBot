@@ -19,6 +19,12 @@ bot.onText(/\/start/, async msg => {
   const chatId = msg.chat.id
   await ensureUser(chatId, msg.from)
 
+  // If there's an active test, end it
+  if (activeTests.has(chatId)) {
+    clearTimeout(activeTests.get(chatId).timeoutId)
+    await endTest(chatId, true)
+  }
+
   bot.sendMessage(
     chatId,
     'Welcome to the JEE Mock Test Bot! This test contains 5 questions and lasts for 30 seconds. Press "Start Test" when you\'re ready.',
@@ -76,6 +82,8 @@ bot.on("poll_answer", async pollAnswer => {
 
 async function startTest(chatId) {
   const questions = await getQuestions()
+  const timeoutId = setTimeout(() => endTest(chatId), TEST_DURATION)
+
   activeTests.set(chatId, {
     questions,
     currentQuestion: 0,
@@ -83,12 +91,10 @@ async function startTest(chatId) {
     startTime: Date.now(),
     answers: new Array(questions.length).fill(null),
     currentMessageId: null,
+    timeoutId,
   })
 
   await sendNextQuestion(chatId)
-
-  // Set timeout to end the test
-  setTimeout(() => endTest(chatId), TEST_DURATION)
 }
 
 async function getQuestions() {
@@ -149,9 +155,11 @@ async function handleNextQuestion(chatId, messageId) {
   await sendNextQuestion(chatId)
 }
 
-async function endTest(chatId) {
+async function endTest(chatId, isRestart = false) {
   const test = activeTests.get(chatId)
   if (!test) return
+
+  clearTimeout(test.timeoutId)
 
   const endTime = Date.now()
   const timeTaken = (endTime - test.startTime) / 1000
@@ -179,25 +187,30 @@ async function endTest(chatId) {
     test.answers
   )
 
-  let resultMessage = `Test completed!\nScore: ${test.score}/${
-    test.questions.length
-  }\nTime taken: ${timeTaken.toFixed(2)} seconds\n\nQuestion summary:`
-  test.answers.forEach((answer, index) => {
-    resultMessage += `\nQ${index + 1}: ${
-      answer === "skipped"
-        ? "Skipped"
-        : answer === "unanswered"
-        ? "Unanswered"
-        : answer === test.questions[index].correct_option_id
-        ? "Correct"
-        : "Incorrect"
-    }`
-  })
+  if (!isRestart) {
+    let resultMessage = `Test completed!\nScore: ${test.score}/${
+      test.questions.length
+    }\nTime taken: ${timeTaken.toFixed(2)} seconds\n\nQuestion summary:`
+    test.answers.forEach((answer, index) => {
+      resultMessage += `\nQ${index + 1}: ${
+        answer === "skipped"
+          ? "Skipped"
+          : answer === "unanswered"
+          ? "Unanswered"
+          : answer === test.questions[index].correct_option_id
+          ? "Correct"
+          : "Incorrect"
+      }`
+    })
 
-  bot.sendMessage(chatId, resultMessage)
+    bot.sendMessage(chatId, resultMessage)
 
-  // Send timeout message
-  bot.sendMessage(chatId, "Time's up! The test has ended.")
+    // Send timeout message
+    bot.sendMessage(
+      chatId,
+      "Time's up! The test has ended. Send /start to take the test again."
+    )
+  }
 
   activeTests.delete(chatId)
 }
