@@ -56,6 +56,7 @@ bot.onText(/\/start/, async msg => {
       `[${new Date().toISOString()}] Error in /start command for chat ID ${chatId}:`,
       error
     )
+    await bot.sendMessage(chatId, "An error occurred. Please try again later.")
   }
 })
 
@@ -83,6 +84,13 @@ bot.on("callback_query", async callbackQuery => {
     console.error(
       `[${new Date().toISOString()}] Error handling callback query for chat ID ${chatId}:`,
       error
+    )
+    await bot.answerCallbackQuery(callbackQuery.id, {
+      text: "An error occurred. Please try again.",
+    })
+    await bot.sendMessage(
+      chatId,
+      "An error occurred. Please send /start to restart the test."
     )
   }
 })
@@ -131,6 +139,10 @@ bot.on("poll_answer", async pollAnswer => {
       `[${new Date().toISOString()}] Error handling poll answer for chat ID ${chatId}:`,
       error
     )
+    await bot.sendMessage(
+      chatId,
+      "An error occurred while recording your answer. Please continue with the next question."
+    )
   }
 })
 
@@ -157,6 +169,10 @@ async function startTest(chatId) {
     console.error(
       `[${new Date().toISOString()}] Error starting test for chat ID ${chatId}:`,
       error
+    )
+    await bot.sendMessage(
+      chatId,
+      "An error occurred while starting the test. Please try again later."
     )
   }
 }
@@ -197,27 +213,38 @@ async function sendNextQuestion(chatId) {
       test.currentQuestion + 1
     } to chat ID ${chatId}`
   )
-  const message = await bot.sendPoll(
-    chatId,
-    `Question ${test.currentQuestion + 1}: ${question.question}`,
-    options,
-    {
-      is_anonymous: false,
-      type: "regular",
-      allows_multiple_answers: false,
-      reply_markup: {
-        inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]],
-      },
-    }
-  )
+  try {
+    const message = await bot.sendPoll(
+      chatId,
+      `Question ${test.currentQuestion + 1}: ${question.question}`,
+      options,
+      {
+        is_anonymous: false,
+        type: "regular",
+        allows_multiple_answers: false,
+        reply_markup: {
+          inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]],
+        },
+      }
+    )
 
-  // Store the message ID for later reference
-  test.currentMessageId = message.message_id
-  console.log(
-    `[${new Date().toISOString()}] Question sent to chat ID ${chatId}, message ID: ${
-      message.message_id
-    }`
-  )
+    // Store the message ID for later reference
+    test.currentMessageId = message.message_id
+    console.log(
+      `[${new Date().toISOString()}] Question sent to chat ID ${chatId}, message ID: ${
+        message.message_id
+      }`
+    )
+  } catch (error) {
+    console.error(
+      `[${new Date().toISOString()}] Error sending question to chat ID ${chatId}:`,
+      error
+    )
+    await bot.sendMessage(
+      chatId,
+      "An error occurred while sending the question. Please send /start to restart the test."
+    )
+  }
 }
 
 async function handleNextQuestion(chatId, messageId) {
@@ -229,14 +256,27 @@ async function handleNextQuestion(chatId, messageId) {
     console.log(
       `[${new Date().toISOString()}] No active test found for chat ID ${chatId}`
     )
+    await bot.sendMessage(
+      chatId,
+      "No active test found. Please send /start to begin a new test."
+    )
     return
   }
 
+  try {
+    console.log(
+      `[${new Date().toISOString()}] Stopping poll for chat ID ${chatId}, message ID: ${messageId}`
+    )
+    await bot.stopPoll(chatId, messageId)
+  } catch (error) {
+    console.error(
+      `[${new Date().toISOString()}] Error stopping poll for chat ID ${chatId}:`,
+      error
+    )
+    // Continue even if stopping the poll fails
+  }
+
   test.currentQuestion++
-  console.log(
-    `[${new Date().toISOString()}] Stopping poll for chat ID ${chatId}, message ID: ${messageId}`
-  )
-  await bot.stopPoll(chatId, messageId)
   await sendNextQuestion(chatId)
 }
 
@@ -246,19 +286,27 @@ async function updateAnswer(chatId, questionIndex, userAnswer) {
       questionIndex + 1
     }`
   )
-  const { rows } = await client.execute({
-    sql: "SELECT id FROM users WHERE chat_id = ?",
-    args: [chatId],
-  })
-  const userId = rows[0].id
+  try {
+    const { rows } = await client.execute({
+      sql: "SELECT id FROM users WHERE chat_id = ?",
+      args: [chatId],
+    })
+    const userId = rows[0].id
 
-  await client.execute({
-    sql: "INSERT OR REPLACE INTO user_answers (user_id, question_id, answer) VALUES (?, ?, ?)",
-    args: [userId, questionIndex + 1, userAnswer],
-  })
-  console.log(
-    `[${new Date().toISOString()}] Answer updated in database for chat ID ${chatId}`
-  )
+    await client.execute({
+      sql: "INSERT OR REPLACE INTO user_answers (user_id, question_id, answer) VALUES (?, ?, ?)",
+      args: [userId, questionIndex + 1, userAnswer],
+    })
+    console.log(
+      `[${new Date().toISOString()}] Answer updated in database for chat ID ${chatId}`
+    )
+  } catch (error) {
+    console.error(
+      `[${new Date().toISOString()}] Error updating answer in database for chat ID ${chatId}:`,
+      error
+    )
+    throw error
+  }
 }
 
 async function endTest(chatId, isRestart = false) {
@@ -274,17 +322,28 @@ async function endTest(chatId, isRestart = false) {
   }
 
   if (!isRestart) {
-    const results = await calculateResults(chatId)
-    let resultMessage = `Test completed!\n\nTotal Questions: ${results.totalQuestions}\nAttempted: ${results.attempted}\nCorrect: ${results.correct}\nIncorrect: ${results.incorrect}\nUnattempted: ${results.unattempted}\n\nTotal Score: ${results.totalScore}`
+    try {
+      const results = await calculateResults(chatId)
+      let resultMessage = `Test completed!\n\nTotal Questions: ${results.totalQuestions}\nAttempted: ${results.attempted}\nCorrect: ${results.correct}\nIncorrect: ${results.incorrect}\nUnattempted: ${results.unattempted}\n\nTotal Score: ${results.totalScore}`
 
-    console.log(
-      `[${new Date().toISOString()}] Sending result message to chat ID ${chatId}`
-    )
-    await bot.sendMessage(chatId, resultMessage)
-    await bot.sendMessage(
-      chatId,
-      "The answer key will be published later. Send /start to take the test again."
-    )
+      console.log(
+        `[${new Date().toISOString()}] Sending result message to chat ID ${chatId}`
+      )
+      await bot.sendMessage(chatId, resultMessage)
+      await bot.sendMessage(
+        chatId,
+        "The answer key will be published later. Send /start to take the test again."
+      )
+    } catch (error) {
+      console.error(
+        `[${new Date().toISOString()}] Error calculating or sending results for chat ID ${chatId}:`,
+        error
+      )
+      await bot.sendMessage(
+        chatId,
+        "An error occurred while calculating your results. Please contact support."
+      )
+    }
   }
 
   activeTests.delete(chatId)
@@ -344,13 +403,26 @@ async function ensureUser(chatId, userInfo) {
   console.log(
     `[${new Date().toISOString()}] Ensuring user in database for chat ID ${chatId}`
   )
-  await client.execute({
-    sql: "INSERT OR IGNORE INTO users (chat_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
-    args: [chatId, userInfo.username, userInfo.first_name, userInfo.last_name],
-  })
-  console.log(
-    `[${new Date().toISOString()}] User ensured in database for chat ID ${chatId}`
-  )
+  try {
+    await client.execute({
+      sql: "INSERT OR IGNORE INTO users (chat_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+      args: [
+        chatId,
+        userInfo.username,
+        userInfo.first_name,
+        userInfo.last_name,
+      ],
+    })
+    console.log(
+      `[${new Date().toISOString()}] User ensured in database for chat ID ${chatId}`
+    )
+  } catch (error) {
+    console.error(
+      `[${new Date().toISOString()}] Error ensuring user in database for chat ID ${chatId}:`,
+      error
+    )
+    throw error
+  }
 }
 
 // Error handling
